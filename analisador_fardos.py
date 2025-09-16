@@ -68,10 +68,13 @@ if __name__ == "__main__":
     MODEL_PATH = "pesos/best.pt"
     model = YOLO(MODEL_PATH)
 
-    cap = cv2.VideoCapture(0)  # webcam
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not access webcam.")
         exit()
+
+    frame_count = 0
+    PROCESS_EVERY = 5  # process 1 in every 5 frames
 
     while True:
         ret, frame = cap.read()
@@ -79,8 +82,13 @@ if __name__ == "__main__":
             print("Error: Failed to capture frame.")
             break
 
-        result_frame, status = analyze_pack_alignment(frame, model)
-        cv2.imshow("Pack Alignment Analysis", result_frame)
+        frame_count += 1
+        if frame_count % PROCESS_EVERY == 0:
+            result_frame, status = analyze_pack_alignment(frame, model)
+            print(status)  # also print result to terminal
+            cv2.imshow("Pack Alignment Analysis", result_frame)
+        else:
+            cv2.imshow("Pack Alignment Analysis", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
