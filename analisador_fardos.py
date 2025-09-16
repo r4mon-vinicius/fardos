@@ -1,130 +1,89 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import os
 from collections import defaultdict
 
-def analisar_alinhamento_fardo(caminho_imagem, caminho_modelo, contagem_esperada=None):
+def analyze_pack_alignment(frame, model, expected_count=None):
     """
-    Analisa a imagem de um fardo para verificar alinhamento, tipo (linhas x colunas),
-    e se está completo ou incompleto usando YOLOv8 e análise de grade.
+    Analyze a pack alignment (rows x cols) using YOLOv8 and grid analysis.
     """
-    # --- 1. Validação e Carregamento ---
-    if not os.path.exists(caminho_imagem):
-        print(f"Erro: Imagem não encontrada em '{caminho_imagem}'")
-        return None, "Erro: Imagem não encontrada"
-    if not os.path.exists(caminho_modelo):
-        print(f"Erro: Modelo não encontrado em '{caminho_modelo}'")
-        return None, "Erro: Modelo não encontrado"
+    result_frame = frame.copy()
+    results = model(frame, verbose=False)
 
-    try:
-        modelo = YOLO(caminho_modelo)
-    except Exception as e:
-        print(f"Erro ao carregar o modelo: {e}")
-        return None, "Erro ao carregar modelo"
-
-    imagem = cv2.imread(caminho_imagem)
-    imagem_resultado = imagem.copy()
-
-    # --- 2. Detecção de Objetos ---
-    resultados = modelo(imagem, verbose=False)
-
-    # --- 3. Extração dos Pontos Centrais ---
-    centros = []
-    alturas_caixas = []
-    for resultado in resultados:
-        boxes = resultado.boxes.cpu().numpy()
-        for box in boxes:
+    centers, box_heights = [], []
+    for result in results:
+        for box in result.boxes.cpu().numpy():
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            confianca = box.conf[0]
-            
-            if confianca > 0.5:
-                cv2.rectangle(imagem_resultado, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                centro_x = int((x1 + x2) / 2)
-                centro_y = int((y1 + y2) / 2)
-                centros.append((centro_x, centro_y))
-                alturas_caixas.append(y2 - y1)
+            conf = box.conf[0]
+            if conf > 0.5:
+                cv2.rectangle(result_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                centers.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                box_heights.append(y2 - y1)
 
-    # --- 4. Análise de Grade ---
-    status_alinhamento = "Nao Alinhado"
-    cor_status = (0, 0, 255)  # Vermelho por padrão
+    status, color = "Not aligned", (0, 0, 255)
 
-    if len(centros) >= 4:
-        pontos = np.array(centros, dtype=np.float32)
+    if len(centers) >= 4:
+        pts = np.array(centers, dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        angle = rect[2]
+        rot_matrix = cv2.getRotationMatrix2D(tuple(rect[0]), angle, 1.0)
+        rotated = cv2.transform(np.array([pts]), rot_matrix)[0]
+        rotated = sorted(rotated, key=lambda p: (p[1], p[0]))
 
-        # Corrige rotação usando bounding box mínimo
-        rect = cv2.minAreaRect(pontos)
-        angulo = rect[2]
-        matriz_rotacao = cv2.getRotationMatrix2D(tuple(rect[0]), angulo, 1.0)
-        pontos_rotacionados = cv2.transform(np.array([pontos]), matriz_rotacao)[0]
+        tol_y = np.mean(box_heights) * 0.5 if box_heights else 20
+        rows, row, ref_y = defaultdict(list), [], rotated[0][1]
 
-        # Ordena pontos por Y, depois por X
-        pontos_rotacionados = sorted(pontos_rotacionados, key=lambda p: (p[1], p[0]))
-
-        # Define tolerância vertical
-        if alturas_caixas:
-            altura_media = np.mean(alturas_caixas)
-            TOLERANCIA_Y = altura_media * 0.5
-        else:
-            TOLERANCIA_Y = 20
-
-        # Agrupa pontos em linhas
-        linhas = defaultdict(list)
-        linha_atual = []
-        ponto_referencia_y = pontos_rotacionados[0][1]
-
-        for ponto in pontos_rotacionados:
-            if abs(ponto[1] - ponto_referencia_y) < TOLERANCIA_Y:
-                linha_atual.append(ponto)
+        for p in rotated:
+            if abs(p[1] - ref_y) < tol_y:
+                row.append(p)
             else:
-                linhas[ponto_referencia_y] = sorted(linha_atual, key=lambda p: p[0])
-                linha_atual = [ponto]
-                ponto_referencia_y = ponto[1]
-        linhas[ponto_referencia_y] = sorted(linha_atual, key=lambda p: p[0])
+                rows[ref_y] = sorted(row, key=lambda x: x[0])
+                row, ref_y = [p], p[1]
+        rows[ref_y] = sorted(row, key=lambda x: x[0])
 
-        # Conta garrafas por linha
-        contagens_por_linha = [len(l) for l in linhas.values()]
-        max_cols = max(contagens_por_linha)   # número de colunas esperado
-        num_linhas = len(linhas)             # número de linhas
-        esperado = max_cols * num_linhas
-        detectado = len(centros)
+        counts = [len(r) for r in rows.values()]
+        max_cols, n_rows = max(counts), len(rows)
+        expected, detected = max_cols * n_rows, len(centers)
 
-        # --- Decisão ---
-        if detectado < esperado:
-            status_alinhamento = (
-                f"Fardo {max_cols}x{num_linhas} ({esperado} garrafas) incompleto: "
-                f"detectadas {detectado}/{esperado}"
-            )
-            cor_status = (0, 165, 255)  # Laranja
-        elif len(set(contagens_por_linha)) == 1 and detectado == esperado:
-            status_alinhamento = f"Alinhado: Fardo {max_cols}x{num_linhas} ({esperado} garrafas)"
-            cor_status = (0, 255, 0)  # Verde
+        if detected < expected:
+            status = f"Incomplete pack {max_cols}x{n_rows}: {detected}/{expected}"
+            color = (0, 165, 255)
+        elif len(set(counts)) == 1 and detected == expected:
+            status = f"Aligned: {max_cols}x{n_rows} ({expected} bottles)"
+            color = (0, 255, 0)
         else:
-            status_alinhamento = f"Nao Alinhado: Linhas com contagens diferentes: {contagens_por_linha}"
-            cor_status = (0, 0, 255)  # Vermelho
+            status = f"Not aligned, row counts: {counts}"
+            color = (0, 0, 255)
 
-    # --- 5. Desenho do Resultado ---
-    for ponto in centros:
-        cv2.circle(imagem_resultado, (int(ponto[0]), int(ponto[1])), 5, (0, 0, 255), -1)
+    for c in centers:
+        cv2.circle(result_frame, (int(c[0]), int(c[1])), 4, (0, 0, 255), -1)
 
-    cv2.putText(imagem_resultado, status_alinhamento, (50, 50), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, cor_status, 2, cv2.LINE_AA)
+    cv2.putText(result_frame, status, (30, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA)
 
-    return imagem_resultado, status_alinhamento
+    return result_frame, status
 
-# --- Execução do Script ---
+
 if __name__ == "__main__":
-    MODELO_PATH = "pesos/best.pt"
-    NOME_IMAGEM = "fardo_teste2.jpg"
-    CONTAGEM_ESPERADA = None  # opcional, pode forçar validação extra
+    MODEL_PATH = "pesos/best.pt"
+    model = YOLO(MODEL_PATH)
 
-    IMAGEM_TESTE_PATH = os.path.join("imagens_teste", NOME_IMAGEM)
-    print(f"Analisando a imagem: {IMAGEM_TESTE_PATH}")
+    cap = cv2.VideoCapture(0)  # webcam
+    if not cap.isOpened():
+        print("Error: Could not access webcam.")
+        exit()
 
-    imagem_final, status = analisar_alinhamento_fardo(IMAGEM_TESTE_PATH, MODELO_PATH, CONTAGEM_ESPERADA)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Failed to capture frame.")
+            break
 
-    if imagem_final is not None:
-        print(f"Resultado da análise: {status}")
-        cv2.imshow("Resultado da Analise", imagem_final)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        result_frame, status = analyze_pack_alignment(frame, model)
+        cv2.imshow("Pack Alignment Analysis", result_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
